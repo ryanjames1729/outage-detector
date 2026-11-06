@@ -13,13 +13,11 @@ Every check returns a CheckResult whose status is one of:
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
 import ssl
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -164,8 +162,8 @@ _SP_INDICATOR = {"none": UP, "maintenance": UP, "minor": DEGRADED,
 
 
 def check_statuspage(svc: dict) -> CheckResult:
-    """Read a vendor's Atlassian Statuspage (used by Zoom, Canvas, GitHub,
-    Dropbox, Atlassian, Discord, and thousands of other SaaS vendors)."""
+    """Read a vendor's Atlassian Statuspage (used by Blackbaud, Finalsite,
+    and thousands of other SaaS vendors)."""
     base = svc["url"].rstrip("/")
     api = base if base.endswith(".json") else f"{base}/api/v2/summary.json"
     try:
@@ -266,89 +264,6 @@ def check_google_workspace(svc: dict) -> CheckResult:
 def check_google_cloud(svc: dict) -> CheckResult:
     """Google Cloud status dashboard (Compute Engine, Cloud Storage...)."""
     return _check_google(svc, GOOGLE_CLOUD_FEED, "https://status.cloud.google.com/")
-
-
-# --------------------------------------------------------------------------
-# Microsoft 365 (tenant-specific, via Microsoft Graph service health)
-# --------------------------------------------------------------------------
-
-# https://learn.microsoft.com/graph/api/resources/servicehealthissue
-_M365_UP = {"serviceOperational", "serviceRestored", "falsePositive", "resolved",
-            "resolvedExternal", "mitigated", "mitigatedExternal",
-            "postIncidentReviewPublished", "investigationSuspended"}
-_M365_DOWN = {"serviceInterruption"}
-GRAPH = "https://graph.microsoft.com/v1.0"
-
-
-def _m365_token(svc: dict) -> str:
-    tenant = os.environ.get("M365_TENANT_ID") or svc.get("tenant_id")
-    client = os.environ.get("M365_CLIENT_ID") or svc.get("client_id")
-    secret = os.environ.get("M365_CLIENT_SECRET")
-    if not (tenant and client and secret):
-        raise LookupError("Microsoft 365 check needs M365_TENANT_ID, "
-                          "M365_CLIENT_ID and M365_CLIENT_SECRET (see README)")
-    body = urllib.parse.urlencode({
-        "client_id": client, "client_secret": secret, "grant_type": "client_credentials",
-        "scope": "https://graph.microsoft.com/.default"}).encode()
-    req = urllib.request.Request(
-        f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-        data=body, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=svc.get("timeout", 15)) as r:
-            return json.loads(r.read())["access_token"]
-    except urllib.error.HTTPError as e:
-        try:
-            err = json.loads(e.read() or b"{}").get("error_description", "")
-        except ValueError:
-            err = ""
-        raise RuntimeError(f"Microsoft sign-in failed (HTTP {e.code}): "
-                           f"{err.splitlines()[0] if err else ''}") from None
-
-
-def check_microsoft365(svc: dict) -> CheckResult:
-    """Microsoft 365 Service health for *your* tenant (Exchange, Teams,
-    SharePoint, OneDrive, Entra ID, Intune...). This is the same data as the
-    admin center's Service health page, which is more accurate than any
-    public Microsoft status page."""
-    try:
-        token = _m365_token(svc)
-        url = (f"{GRAPH}/admin/serviceAnnouncement/issues"
-               "?$filter=isResolved%20eq%20false&$top=100")
-        issues: list[dict] = []
-        while url:
-            code, body, _ = _request(url, timeout=svc.get("timeout", 15), headers={
-                "Authorization": f"Bearer {token}", "Accept": "application/json"})
-            if code >= 400:
-                raise RuntimeError(f"Graph API HTTP {code}: {body[:200]!r}")
-            page = json.loads(body)
-            issues += page.get("value", [])
-            url = page.get("@odata.nextLink")
-    except LookupError as e:
-        return CheckResult(UNKNOWN, str(e))
-    except Exception as e:  # noqa: BLE001
-        return CheckResult(UNKNOWN, f"Could not read Microsoft 365 service health: "
-                                    f"{_describe_error(e)}")
-
-    wanted = {_norm(s) for s in svc.get("services", [])}
-    advisories = svc.get("include_advisories", False)
-    statuses, details = [], []
-    for i in issues:
-        if wanted and _norm(i.get("service", "")) not in wanted:
-            continue
-        if i.get("classification") != "incident" and not advisories:
-            continue
-        st = i.get("status", "")
-        s = UP if st in _M365_UP else DOWN if st in _M365_DOWN else DEGRADED
-        statuses.append(s)
-        if s != UP:
-            impact = " ".join((i.get("impactDescription") or "").split())[:300]
-            details.append(f"{i.get('service')} - {i.get('title')} [{i.get('id')}, "
-                           f"{st}]: {impact}")
-    status = worst(statuses)
-    summary = ("No active incidents" if status == UP
-               else f"{len(details)} active incident(s)")
-    details.append("Admin center: https://admin.microsoft.com/#/servicehealth")
-    return CheckResult(status, summary, details)
 
 
 # --------------------------------------------------------------------------
@@ -502,7 +417,6 @@ CHECKS: dict[str, Callable[[dict], CheckResult]] = {
     "statuspage": check_statuspage,
     "google_workspace": check_google_workspace,
     "google_cloud": check_google_cloud,
-    "microsoft365": check_microsoft365,
     "aws": check_aws,
     "page_text": check_page_text,
 }

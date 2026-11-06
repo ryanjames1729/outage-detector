@@ -30,8 +30,6 @@ subject_prefix = "[Outage Detector]"
 # type = "google_workspace" Google Workspace Status Dashboard.
 #                           Optional: products = ["Gmail", "Google Drive", ...]
 # type = "google_cloud"     Google Cloud status. Optional: products = [...]
-# type = "microsoft365"     Your tenant's Microsoft 365 Service health (Graph).
-#                           Optional: services = [...], include_advisories
 # type = "aws"              AWS Health Dashboard. Optional: regions, services
 # type = "page_text"        A status message on a normal web page. Required:
 #                           url, ok_text. Optional: section_class (HTML class
@@ -94,19 +92,6 @@ description = "Expect tickets about email, Drive, and Classroom."
 # type = "google_cloud"
 # products = ["Google Compute Engine", "Google Cloud Storage"]
 
-# --- Microsoft ---------------------------------------------------------------
-# Reads Service health for YOUR tenant via Microsoft Graph (same data as the
-# admin center). Needs an app registration - see README "Microsoft 365 setup".
-# Credentials come from M365_TENANT_ID / M365_CLIENT_ID / M365_CLIENT_SECRET.
-[[service]]
-name = "Microsoft 365"
-type = "microsoft365"
-services = ["Exchange Online", "Microsoft Teams", "SharePoint Online",
-            "OneDrive for Business", "Microsoft 365 suite", "Microsoft Entra",
-            "Microsoft Intune", "Microsoft 365 apps"]
-# include_advisories = true     # also alert on lower-impact advisories
-description = "Expect tickets about Outlook, Teams, OneDrive, and sign-in."
-
 # --- AWS ---------------------------------------------------------------------
 # Public AWS Health Dashboard. Filter by region and/or service so you only hear
 # about what you (or your vendors) actually use. us-east-1 hosts a huge share
@@ -119,9 +104,9 @@ regions = ["us-east-1", "us-east-2"]
 description = "A us-east-1 outage often takes down other SaaS vendors too."
 
 # --- Internet service: ERC Broadband ----------------------------------------
-# 1) ERC's own network status (the "NETWORK STATUS" box on their homepage).
-#    Normally says "All ERC network systems are fully operational". If ERC
-#    posts anything else, you get an alert quoting their message.
+# ERC's own network status (the "NETWORK STATUS" box on their homepage).
+# Normally says "All ERC network systems are fully operational". If ERC posts
+# anything else, you get an alert quoting their message.
 [[service]]
 name = "ERC Broadband network status"
 type = "page_text"
@@ -130,37 +115,6 @@ section_class = "network-status"
 ok_text = "fully operational"
 failure_threshold = 1      # ERC only changes this text on purpose
 description = "ERC NOC: (828) 350-2415, after hours (866) 372-7110."
-
-# 2) Your campus connection, tested from the outside (recommended).
-# GitHub's servers try to reach your campus from the outside. If they can't,
-# your internet circuit is down - and because the alert is sent from GitHub,
-# it still reaches your phone (over cellular) while campus is offline.
-#
-# Point it at your firewall's public (WAN) IP and a port that answers from the
-# internet, e.g. your VPN portal (443), or use an "http" check against
-# something hosted on campus. If you have a backup ISP, add a second entry for
-# that IP so you know when you've failed over.
-#
-# [[service]]
-# name = "Campus internet (ERC Broadband)"
-# type = "tcp"
-# host = "203.0.113.10"      # <-- your ERC public IP or a DNS name that points to it
-# port = 443                 # <-- a port your firewall answers on
-# timeout = 10
-# failure_threshold = 2
-# reminder_minutes = 30
-# description = "Campus internet appears to be down. Call ERC Broadband support."
-
-# --- Other vendors -----------------------------------------------------------
-[[service]]
-name = "Canvas (Instructure)"
-type = "statuspage"
-url = "https://status.instructure.com"
-
-[[service]]
-name = "Zoom"
-type = "statuspage"
-url = "https://status.zoom.us"
 
 # --- Templates: uncomment and edit -----------------------------------------
 

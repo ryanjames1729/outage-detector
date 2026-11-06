@@ -415,43 +415,6 @@ class TestAws(ServerTest):
         self.assertEqual(checks.check_aws({"url": self.base + "/aws"}).status, UP)
 
 
-class TestMicrosoft365(unittest.TestCase):
-    ISSUES = [
-        {"id": "EX1", "service": "Exchange Online", "title": "Mail delays",
-         "classification": "incident", "status": "serviceDegradation",
-         "impactDescription": "Users may see delays"},
-        {"id": "TM1", "service": "Microsoft Teams", "title": "Can't join meetings",
-         "classification": "incident", "status": "serviceInterruption"},
-        {"id": "SP1", "service": "SharePoint Online", "title": "Minor thing",
-         "classification": "advisory", "status": "serviceDegradation"},
-    ]
-
-    def run_check(self, svc, issues=None):
-        body = json.dumps({"value": self.ISSUES if issues is None else issues}).encode()
-        with mock.patch.object(checks, "_m365_token", return_value="tok"), \
-             mock.patch.object(checks, "_request", return_value=(200, body, 5)) as req:
-            r = checks.check_microsoft365(svc)
-        if req.called:
-            self.assertEqual(req.call_args.kwargs["headers"]["Authorization"], "Bearer tok")
-        return r
-
-    def test_mapping_and_filters(self):
-        self.assertEqual(self.run_check({}).status, DOWN)
-        r = self.run_check({"services": ["exchange online"]})
-        self.assertEqual(r.status, DEGRADED)
-        self.assertIn("EX1", r.details[0])
-        self.assertEqual(self.run_check({"services": ["SharePoint Online"]}).status, UP)
-        self.assertEqual(self.run_check({"services": ["SharePoint Online"],
-                                         "include_advisories": True}).status, DEGRADED)
-        self.assertEqual(self.run_check({}, issues=[]).status, UP)
-
-    def test_missing_credentials_is_unknown(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            r = checks.check_microsoft365({})
-        self.assertEqual(r.status, UNKNOWN)
-        self.assertIn("M365_CLIENT_SECRET", r.summary)
-
-
 class TestUnknownAlert(unittest.TestCase):
     def test_alerts_once_when_check_keeps_failing(self):
         with tempfile.TemporaryDirectory() as d:

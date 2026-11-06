@@ -59,7 +59,7 @@ _ENV_MAP = {
 }
 
 _REQUIRED = {"http": ["url"], "tcp": ["host", "port"], "statuspage": ["url"],
-             "google_cloud": [], "microsoft365": [], "aws": [],
+             "google_cloud": [], "aws": [],
              "page_text": ["url", "ok_text"],
              "google_workspace": []}
 
