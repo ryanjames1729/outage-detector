@@ -381,6 +381,12 @@ def check_aws(svc: dict) -> CheckResult:
 
     regions = {r.lower() for r in svc.get("regions", [])}
     services = {_norm(s) for s in svc.get("services", [])}
+
+    def svc_match(key: str, name: str) -> bool:
+        key = key.lower()
+        return any(s == _norm(name) or s == key or key.startswith(s + "-")
+                   for s in services)
+
     statuses, details = [], []
     for ev in events:
         key = (ev.get("service") or "").lower()          # e.g. "ec2-us-east-1"
@@ -388,16 +394,26 @@ def check_aws(svc: dict) -> CheckResult:
         region = (ev.get("region_name") or "").lower()
         if regions and not any(r in key or r == region for r in regions):
             continue
-        if services and not any(s == _norm(name) or key.startswith(s + "-")
-                                or s == key for s in services):
-            continue
+        status_code = str(ev.get("status"))
+        if services and not svc_match(key, name):
+            # "Multiple services" events list what's affected separately.
+            hits = {k: v for k, v in (ev.get("impacted_services") or {}).items()
+                    if svc_match(k, v.get("service_name", ""))}
+            if not hits:
+                continue
+            name = ", ".join(sorted(v.get("service_name", k) for k, v in hits.items()))
+            status_code = max((str(v.get("current", "1")) for v in hits.values()),
+                              key=lambda c: SEVERITY[_AWS_STATUS.get(c, DEGRADED)])
         summary = ev.get("summary") or ""
         if summary.upper().startswith("[RESOLVED]"):
             continue
-        s = _AWS_STATUS.get(str(ev.get("status")), DEGRADED)
+        s = _AWS_STATUS.get(status_code, DEGRADED)
         statuses.append(s)
         if s != UP:
-            details.append(f"{name} ({ev.get('region_name') or 'global'}): {summary}")
+            log = ev.get("event_log") or []
+            latest = " ".join(str(log[-1].get("message", "")).split())[:400] if log else ""
+            line = f"{name} ({ev.get('region_name') or 'global'}): {summary}"
+            details.append(f"{line} - latest update: {latest}" if latest else line)
     status = worst(statuses)
     summary = ("No active events" if status == UP
                else f"{len(details)} active event(s)")

@@ -389,6 +389,25 @@ class TestAws(ServerTest):
         r = checks.check_aws({"url": url, "services": ["ec2"]})
         self.assertEqual(r.status, DOWN)
 
+    def test_multiple_services_event(self):
+        # Shape taken from the live feed.
+        ev = [{"service": "multipleservices-us-east-1", "service_name": "Multiple services",
+               "region_name": "N. Virginia", "status": "3", "summary": "Region Availability",
+               "event_log": [{"message": "old"}, {"message": "We are investigating  errors."}],
+               "impacted_services": {
+                   "ec2-us-east-1": {"service_name": "Amazon Elastic Compute Cloud", "current": "3"},
+                   "cloudfront-us-east-1": {"service_name": "Amazon CloudFront", "current": "1"}}}]
+        ROUTES["/aws"] = (200, b"\xfe\xff" + json.dumps(ev).encode("utf-16-be"))
+        url = self.base + "/aws"
+        r = checks.check_aws({"url": url, "services": ["ec2"]})
+        self.assertEqual(r.status, DOWN)
+        self.assertIn("Amazon Elastic Compute Cloud (N. Virginia)", r.details[0])
+        self.assertIn("latest update: We are investigating errors.", r.details[0])
+        r = checks.check_aws({"url": url, "services": ["Amazon CloudFront"]})
+        self.assertEqual(r.status, DEGRADED)
+        self.assertEqual(checks.check_aws({"url": url, "services": ["Amazon S3"]}).status, UP)
+        self.assertEqual(checks.check_aws({"url": url, "regions": ["us-west-2"]}).status, UP)
+
     def test_empty_feed(self):
         ROUTES["/aws"] = (200, b"")
         self.assertEqual(checks.check_aws({"url": self.base + "/aws"}).status, UP)

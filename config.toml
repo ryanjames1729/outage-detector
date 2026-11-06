@@ -81,9 +81,11 @@ description = "Expect questions about the school website and parent emails/notif
 [[service]]
 name = "Google Workspace"
 type = "google_workspace"
-products = ["Gmail", "Google Drive", "Google Classroom", "Google Meet",
+# Names must match Google's dashboard exactly (case-insensitive), e.g. it's
+# "Classroom", not "Google Classroom". Remove the line to watch everything.
+products = ["Gmail", "Google Drive", "Classroom", "Google Meet",
             "Google Calendar", "Google Docs", "Google Sheets", "Google Slides",
-            "Google Forms", "Google Chat", "Admin console"]
+            "Google Forms", "Google Chat", "Admin Console", "Google Voice"]
 description = "Expect tickets about email, Drive, and Classroom."
 
 # Google Cloud (only if you host things in GCP):
