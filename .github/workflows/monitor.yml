@@ -1,0 +1,54 @@
+name: Outage monitor
+
+on:
+  schedule:
+    # GitHub's minimum is every 5 minutes; runs can start a few minutes late
+    # when GitHub is busy. See README for Actions-minutes math on private repos.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # "Run workflow" button for manual runs
+
+# Never let two runs overlap (they'd fight over state.json).
+concurrency:
+  group: outage-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # state.json remembers what's down between runs (so you get one alert,
+      # not one every 5 minutes). Each run saves a new cache entry and the
+      # next run restores the most recent one.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: outage-state-${{ github.run_id }}
+          restore-keys: outage-state-
+
+      - name: Run checks
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python -m outage_detector run --once
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: outage-state-${{ github.run_id }}

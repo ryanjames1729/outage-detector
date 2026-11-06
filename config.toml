@@ -1,0 +1,89 @@
+# Outage Detector configuration
+#
+# Safe to commit: put SMTP credentials and recipients in GitHub Actions
+# secrets (or environment variables) - see README.md. Any [email] value can be
+# overridden by SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD,
+# SMTP_SECURITY, ALERT_FROM, ALERT_TO (comma separated).
+
+[settings]
+failure_threshold = 2     # consecutive failed checks before alerting
+recovery_threshold = 2    # consecutive good checks before "recovered"
+reminder_minutes = 60     # re-alert while still down (0 = never)
+alert_on_degraded = true  # also alert on partial outages / slowness
+interval_seconds = 300    # only used by `run` without --once (loop mode)
+state_file = "state.json"
+
+[email]
+host = "smtp.gmail.com"   # Microsoft 365: smtp.office365.com
+port = 587
+security = "starttls"     # starttls (587) | ssl (465) | none
+# username, password, from and to are read from secrets / env vars.
+subject_prefix = "[Outage Detector]"
+
+# ---------------------------------------------------------------------------
+# Services
+#
+# type = "statuspage"       Vendor status pages built on Atlassian Statuspage
+#                           (look for "Powered by Atlassian Statuspage" at the
+#                           bottom of the page). Optional: components = [...]
+# type = "google_workspace" Google Workspace Status Dashboard.
+#                           Optional: products = ["Gmail", "Google Drive", ...]
+# type = "http"             Probe a URL directly. Optional: keyword,
+#                           expected_status, timeout, degraded_latency_ms
+# type = "tcp"              Check that host:port accepts connections.
+#
+# Any service can override failure_threshold, recovery_threshold,
+# reminder_minutes, alert_on_degraded, and add extra recipients with
+# notify = ["someone@example.org"]. "description" is included in alerts.
+# ---------------------------------------------------------------------------
+
+[[service]]
+name = "Google Workspace"
+type = "google_workspace"
+products = ["Gmail", "Google Drive", "Google Classroom", "Google Meet",
+            "Google Calendar", "Google Docs", "Admin Console"]
+description = "Expect tickets about email, Drive, and Classroom."
+
+[[service]]
+name = "Canvas (Instructure)"
+type = "statuspage"
+url = "https://status.instructure.com"
+# components = ["Canvas"]   # optionally only watch specific components
+
+[[service]]
+name = "Zoom"
+type = "statuspage"
+url = "https://status.zoom.us"
+
+# --- Templates: uncomment and edit -----------------------------------------
+
+# [[service]]
+# name = "School website"
+# type = "http"
+# url = "https://www.example.org"
+# keyword = "Welcome"            # page must contain this text
+# degraded_latency_ms = 5000     # alert as DEGRADED if slower than this
+
+# [[service]]
+# name = "Student Information System"
+# type = "http"
+# url = "https://sis.example.org/login"
+# expected_status = [200, 302]
+# failure_threshold = 3
+
+# [[service]]
+# name = "Clever"
+# type = "statuspage"
+# url = "https://status.clever.com"
+
+# [[service]]
+# name = "GitHub"
+# type = "statuspage"
+# url = "https://www.githubstatus.com"
+# components = ["Git Operations", "Actions"]
+
+# [[service]]
+# name = "Mail relay"
+# type = "tcp"
+# host = "mail.example.org"
+# port = 25
