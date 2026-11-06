@@ -5,7 +5,12 @@ on:
     # GitHub's minimum is every 5 minutes; runs can start a few minutes late
     # when GitHub is busy. See README for Actions-minutes math on private repos.
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # "Run workflow" button for manual runs
+  workflow_dispatch:      # "Run workflow" button for manual runs
+    inputs:
+      test_email:
+        description: "Also send a test email (checks your SMTP settings)"
+        type: boolean
+        default: false
 
 # Never let two runs overlap (they'd fight over state.json).
 concurrency:
@@ -19,6 +24,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      ALERT_FROM: ${{ secrets.ALERT_FROM }}
+      ALERT_TO: ${{ secrets.ALERT_TO }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,14 +48,11 @@ jobs:
           key: outage-state-${{ github.run_id }}
           restore-keys: outage-state-
 
+      - name: Send test email
+        if: ${{ inputs.test_email }}
+        run: python -m outage_detector test-email
+
       - name: Run checks
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          ALERT_FROM: ${{ secrets.ALERT_FROM }}
-          ALERT_TO: ${{ secrets.ALERT_TO }}
         run: python -m outage_detector run --once
 
       - name: Save state

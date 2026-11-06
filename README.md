@@ -82,8 +82,10 @@ and alerts name the specific component that's affected.
    | `ALERT_FROM` *(optional)* | defaults to `SMTP_USERNAME` |
    | `SMTP_HOST` / `SMTP_PORT` *(optional)* | override `config.toml` |
 
-3. **Test it**: *Actions → Outage monitor → Run workflow*. Look at the run log
-   to see every check's result.
+3. **Test it**: *Actions → Outage monitor → Run workflow*, tick **"Also send a
+   test email"**, and run. You should get a test email within a minute, and
+   the run log shows every check's result. Normal runs only email when
+   something changes, so a quiet inbox means everything is up.
 4. That's it. The workflow runs every 5 minutes on the default branch.
 
 ### Email provider notes
