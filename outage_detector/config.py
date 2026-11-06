@@ -90,8 +90,13 @@ def load_config(path: str | Path) -> Config:
     if "password_env" in e:  # e.g. password_env = "GMAIL_APP_PASSWORD"
         e["password"] = os.environ.get(e.pop("password_env"), "")
     for key, env in _ENV_MAP.items():
-        if os.environ.get(env):
-            e[key] = os.environ[env]
+        if os.environ.get(env, "").strip():
+            # Pasted secrets often pick up a trailing newline or spaces.
+            e[key] = os.environ[env].strip()
+    # Google shows App Passwords as "abcd efgh ijkl mnop"; the spaces aren't
+    # part of the password.
+    if re.fullmatch(r"[a-zA-Z]{4}( [a-zA-Z]{4}){3}", str(e.get("password", ""))):
+        e["password"] = e["password"].replace(" ", "")
     if isinstance(e.get("to"), str):
         e["to"] = [a.strip() for a in e["to"].split(",") if a.strip()]
     unknown = set(e) - set(EmailConfig.__dataclass_fields__)
@@ -102,6 +107,8 @@ def load_config(path: str | Path) -> Config:
     email.security = email.security.lower()
     if email.security not in ("starttls", "ssl", "none"):
         raise ConfigError("[email] security must be starttls, ssl or none")
+    if email.port == 465 and email.security == "starttls":
+        email.security = "ssl"  # 465 is always implicit TLS
     if not email.sender:
         email.sender = email.username
 

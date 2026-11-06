@@ -183,9 +183,9 @@ def run_once(cfg: Config, *, send: bool = True, now: datetime | None = None,
     if events and send:
         try:
             (notifier or send_events)(cfg, events)
-        except Exception:
+        except Exception as e:
             # Don't save state, so the alert is retried on the next run.
-            log.exception("Failed to send alert email; will retry next run")
+            log.error("Failed to send alert email; will retry next run.\n%s", e)
             raise
     store.save({s["id"] for s in cfg.services})
     return events

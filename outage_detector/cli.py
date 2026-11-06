@@ -17,7 +17,7 @@ import time
 from .checks import UP
 from .config import ConfigError, load_config
 from .monitor import ICON, StateStore, check_all, run_once
-from .notifier import send_email
+from .notifier import EmailError, send_email
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,9 +53,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if bad else 0
 
     if args.cmd == "test-email":
-        send_email(cfg.email, cfg.email.to, f"{cfg.email.subject_prefix} Test email",
-                   "If you can read this, outage-detector email alerts are working.")
-        print(f"Test email sent to {', '.join(cfg.email.to)}")
+        try:
+            send_email(cfg.email, cfg.email.to, f"{cfg.email.subject_prefix} Test email",
+                       "If you can read this, outage-detector email alerts are working.")
+        except (EmailError, RuntimeError) as e:
+            print(f"\nTEST EMAIL FAILED\n{e}", file=sys.stderr)
+            return 1
+        print(f"Test email sent to {len(cfg.email.to)} recipient(s)")
         return 0
 
     if args.cmd == "status":

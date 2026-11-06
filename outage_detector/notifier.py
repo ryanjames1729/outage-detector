@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import logging
 import smtplib
 import ssl
+import time
 from collections import defaultdict
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
@@ -12,6 +14,8 @@ from email.utils import formatdate, make_msgid
 from .checks import DEGRADED, DOWN, UNKNOWN, UP
 from .config import Config, EmailConfig
 from .monitor import Event
+
+log = logging.getLogger("outage_detector")
 
 LABEL = {
     DOWN: ("DOWN", "#c62828"),
@@ -115,17 +119,89 @@ def send_email(cfg: EmailConfig, to: list[str], subject: str, text: str,
     if html_body:
         msg.add_alternative(html_body, subtype="html")
 
-    ctx = ssl.create_default_context()
-    if cfg.security == "ssl":
-        server = smtplib.SMTP_SSL(cfg.host, cfg.port, context=ctx, timeout=30)
+    # Try the configured settings, retry once, and for Gmail fall back to
+    # implicit TLS on 465 (some cloud networks have trouble on 587).
+    attempts = [(cfg.security, cfg.port), (cfg.security, cfg.port)]
+    if cfg.host.lower() in GMAIL_HOSTS and (cfg.security, cfg.port) != ("ssl", 465):
+        attempts.append(("ssl", 465))
+    errors: list[str] = []
+    for i, (security, port) in enumerate(attempts):
+        if i:
+            time.sleep(3)
+        stage = "connect"
+        try:
+            ctx = ssl.create_default_context()
+            log.info("SMTP: connecting to %s:%s (%s)", cfg.host, port, security)
+            if security == "ssl":
+                server = smtplib.SMTP_SSL(cfg.host, port, context=ctx, timeout=30)
+            else:
+                server = smtplib.SMTP(cfg.host, port, timeout=30)
+            with server:
+                if security == "starttls":
+                    stage = "STARTTLS"
+                    server.starttls(context=ctx)
+                if cfg.username:
+                    stage = "login"
+                    server.ehlo_or_helo_if_needed()
+                    log.info("SMTP: server offers AUTH %s",
+                             server.esmtp_features.get("auth", "(none)").strip())
+                    server.login(cfg.username, cfg.password)
+                stage = "send"
+                server.send_message(msg)
+            if errors:
+                log.warning("SMTP: sent after earlier failure(s): %s", "; ".join(errors))
+            return
+        except smtplib.SMTPAuthenticationError as e:
+            # Wrong credentials won't fix themselves on retry.
+            raise EmailError(_explain(cfg, "login", e)) from None
+        except (smtplib.SMTPException, OSError) as e:
+            errors.append(f"{cfg.host}:{port} {stage}: {type(e).__name__}: {e}")
+            log.warning("SMTP: %s", errors[-1])
+            last_stage, last_exc = stage, e
+    raise EmailError(_explain(cfg, last_stage, last_exc, errors))
+
+
+GMAIL_HOSTS = {"smtp.gmail.com", "smtp.googlemail.com"}
+
+
+class EmailError(Exception):
+    """Sending failed; the message explains likely causes (never secrets)."""
+
+
+def _explain(cfg: EmailConfig, stage: str, exc: BaseException,
+             errors: list[str] | None = None) -> str:
+    lines = [f"Could not send email via {cfg.host} (failed at: {stage})."]
+    if errors:
+        lines.append("Attempts:")
+        lines += [f"  - {e}" for e in errors]
     else:
-        server = smtplib.SMTP(cfg.host, cfg.port, timeout=30)
-    with server:
-        if cfg.security == "starttls":
-            server.starttls(context=ctx)
-        if cfg.username:
-            server.login(cfg.username, cfg.password)
-        server.send_message(msg)
+        lines.append(f"Server said: {exc}")
+    gmail = cfg.host.lower() in GMAIL_HOSTS
+    pw = cfg.password or ""
+    lines.append("Things to check:")
+    if not cfg.username or not pw:
+        lines.append("  - SMTP_USERNAME and/or SMTP_PASSWORD are empty.")
+    if stage == "login" and gmail:
+        lines.append("  - SMTP_USERNAME must be the full Gmail/Workspace address "
+                     f"({'looks OK' if '@' in cfg.username else 'it has no @'}).")
+        looks_app_pw = len(pw) == 16 and pw.isalpha()
+        lines.append("  - SMTP_PASSWORD must be a 16-letter Google App Password, not "
+                     "the account's normal password "
+                     f"({'looks like one' if looks_app_pw else 'it does NOT look like one'}). "
+                     "Create one at https://myaccount.google.com/apppasswords "
+                     "(requires 2-Step Verification).")
+        lines.append("  - Google Workspace: an admin may have blocked App Passwords or "
+                     "SMTP for this account/OU. If so, use smtp-relay.gmail.com, or "
+                     "send through another provider.")
+        lines.append("  - Check the sending account's inbox for a Google "
+                     "'sign-in attempt blocked' security alert.")
+    elif stage == "login":
+        lines.append("  - Check SMTP_USERNAME / SMTP_PASSWORD and that the provider "
+                     "allows SMTP AUTH for this mailbox.")
+    elif stage in ("connect", "STARTTLS"):
+        lines.append(f"  - Check SMTP_HOST/SMTP_PORT ({cfg.host}:{cfg.port}, "
+                     f"{cfg.security}). Use 587 with starttls, or 465 with ssl.")
+    return "\n".join(lines)
 
 
 def send_events(cfg: Config, events: list[Event]) -> None:

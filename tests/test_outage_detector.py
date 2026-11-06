@@ -285,8 +285,9 @@ class TestEndToEnd(ServerTest):
                 f'[[service]]\nname = "Site"\ntype = "http"\nurl = "{self.base}/"\n',
                 failure_threshold=1))
             ROUTES["/"] = (500, b"")
-            with mock.patch("smtplib.SMTP", side_effect=OSError("smtp down")):
-                with self.assertRaises(OSError):
+            with mock.patch("smtplib.SMTP", side_effect=OSError("smtp down")), \
+                 mock.patch("time.sleep"):
+                with self.assertRaises(notifier.EmailError):
                     run_once(cfg)
             with mock.patch("smtplib.SMTP"):
                 self.assertEqual([e.kind for e in run_once(cfg)], ["down"])
@@ -464,6 +465,65 @@ class TestPageText(ServerTest):
     def test_layout_change_is_unknown(self):
         ROUTES["/"] = (200, b"<html><body>redesigned</body></html>")
         self.assertEqual(checks.check_page_text(self.svc()).status, UNKNOWN)
+
+
+class TestSmtpDiagnostics(unittest.TestCase):
+    def cfg(self, **kw):
+        from outage_detector.config import EmailConfig
+        base = dict(host="smtp.gmail.com", port=587, security="starttls",
+                    username="alerts@example.org", password="abcdefghijklmnop",
+                    sender="alerts@example.org", to=["it@example.org"])
+        return EmailConfig(**{**base, **kw})
+
+    def test_gmail_disconnect_falls_back_to_465(self):
+        import smtplib
+        with mock.patch("smtplib.SMTP") as plain, mock.patch("smtplib.SMTP_SSL") as tls, \
+             mock.patch("time.sleep"):
+            plain.return_value.login.side_effect = smtplib.SMTPServerDisconnected(
+                "Connection unexpectedly closed")
+            plain.return_value.esmtp_features = {"auth": " LOGIN PLAIN"}
+            notifier.send_email(self.cfg(), ["it@example.org"], "s", "t")
+        self.assertEqual(plain.call_count, 2)          # tried 587 twice
+        self.assertEqual(tls.call_args.args[:2], ("smtp.gmail.com", 465))
+        tls.return_value.send_message.assert_called_once()
+
+    def test_all_attempts_fail_gives_readable_explanation(self):
+        import smtplib
+        with mock.patch("smtplib.SMTP") as plain, mock.patch("smtplib.SMTP_SSL") as tls, \
+             mock.patch("time.sleep"):
+            for m in (plain, tls):
+                m.return_value.login.side_effect = smtplib.SMTPServerDisconnected("closed")
+                m.return_value.esmtp_features = {}
+            with self.assertRaises(notifier.EmailError) as ctx:
+                notifier.send_email(self.cfg(password="hunter2"), ["x@y.z"], "s", "t")
+        msg = str(ctx.exception)
+        self.assertIn("failed at: login", msg)
+        self.assertIn("smtp.gmail.com:465", msg)
+        self.assertIn("does NOT look like one", msg)
+        self.assertNotIn("hunter2", msg)
+
+    def test_bad_password_is_not_retried(self):
+        import smtplib
+        with mock.patch("smtplib.SMTP") as plain, mock.patch("time.sleep"):
+            plain.return_value.login.side_effect = smtplib.SMTPAuthenticationError(
+                535, b"5.7.8 Username and Password not accepted")
+            plain.return_value.esmtp_features = {}
+            with self.assertRaises(notifier.EmailError) as ctx:
+                notifier.send_email(self.cfg(), ["x@y.z"], "s", "t")
+        self.assertEqual(plain.call_count, 1)
+        self.assertIn("Username and Password not accepted", str(ctx.exception))
+        self.assertIn("looks like one", str(ctx.exception))
+
+    def test_secret_whitespace_cleanup(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = make_config(Path(d), SVC)
+            env = {"SMTP_PASSWORD": "abcd efgh ijkl mnop\n", "SMTP_USERNAME": " a@b.org\n",
+                   "SMTP_PORT": "465\n"}
+            with mock.patch.dict(os.environ, env):
+                cfg = load_config(p)
+        self.assertEqual(cfg.email.password, "abcdefghijklmnop")
+        self.assertEqual(cfg.email.username, "a@b.org")
+        self.assertEqual((cfg.email.port, cfg.email.security), (465, "ssl"))
 
 
 if __name__ == "__main__":
