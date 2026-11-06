@@ -10,6 +10,7 @@ failure_threshold = 2     # consecutive failed checks before alerting
 recovery_threshold = 2    # consecutive good checks before "recovered"
 reminder_minutes = 60     # re-alert while still down (0 = never)
 alert_on_degraded = true  # also alert on partial outages / slowness
+unknown_alert_minutes = 120  # email once if a check itself keeps failing (0 = never)
 interval_seconds = 300    # only used by `run` without --once (loop mode)
 state_file = "state.json"
 
@@ -28,6 +29,13 @@ subject_prefix = "[Outage Detector]"
 #                           bottom of the page). Optional: components = [...]
 # type = "google_workspace" Google Workspace Status Dashboard.
 #                           Optional: products = ["Gmail", "Google Drive", ...]
+# type = "google_cloud"     Google Cloud status. Optional: products = [...]
+# type = "microsoft365"     Your tenant's Microsoft 365 Service health (Graph).
+#                           Optional: services = [...], include_advisories
+# type = "aws"              AWS Health Dashboard. Optional: regions, services
+# type = "page_text"        A status message on a normal web page. Required:
+#                           url, ok_text. Optional: section_class (HTML class
+#                           of the element holding the message), problem_status
 # type = "http"             Probe a URL directly. Optional: keyword,
 #                           expected_status, timeout, degraded_latency_ms
 # type = "tcp"              Check that host:port accepts connections.
@@ -37,18 +45,115 @@ subject_prefix = "[Outage Detector]"
 # notify = ["someone@example.org"]. "description" is included in alerts.
 # ---------------------------------------------------------------------------
 
+# --- Blackbaud ---------------------------------------------------------------
+# Live list of component names: https://status.blackbaud.com/api/v2/summary.json
+# Naming a group watches every product in it. ™ and ® can be left out.
+[[service]]
+name = "Blackbaud"
+type = "statuspage"
+url = "https://status.blackbaud.com"
+components = [
+  # Group: SIS, LMS, Enrollment, Billing, School Website System, Core, School API
+  "Blackbaud Education Management Solutions",
+  "Blackbaud ID",                 # sign-in for every Blackbaud product
+  "Blackbaud Raiser's Edge NXT",  # group: advancement / development office
+  "Blackbaud Financial Edge NXT", # group: business office
+  "Blackbaud Tuition Management",
+]
+description = "Expect tickets about myBlackbaud logins, grades, schedules, and billing."
+
+# --- Finalsite ---------------------------------------------------------------
+# Live list of component names: https://status.finalsite.com/api/v2/summary.json
+[[service]]
+name = "Finalsite"
+type = "statuspage"
+url = "https://status.finalsite.com"
+components = [
+  "School Websites",              # group: Composer (all regions), Web Community Manager
+  "Communication Tools",          # group: Messages XR, Mass Notifications, Connect, Chat
+  "Enrollment Management System",
+]
+# To only watch your region's website hosting, replace "School Websites"
+# with e.g. "Composer US East".
+description = "Expect questions about the school website and parent emails/notifications."
+
+# --- Google ------------------------------------------------------------------
 [[service]]
 name = "Google Workspace"
 type = "google_workspace"
 products = ["Gmail", "Google Drive", "Google Classroom", "Google Meet",
-            "Google Calendar", "Google Docs", "Admin Console"]
+            "Google Calendar", "Google Docs", "Google Sheets", "Google Slides",
+            "Google Forms", "Google Chat", "Admin console"]
 description = "Expect tickets about email, Drive, and Classroom."
 
+# Google Cloud (only if you host things in GCP):
+# [[service]]
+# name = "Google Cloud"
+# type = "google_cloud"
+# products = ["Google Compute Engine", "Google Cloud Storage"]
+
+# --- Microsoft ---------------------------------------------------------------
+# Reads Service health for YOUR tenant via Microsoft Graph (same data as the
+# admin center). Needs an app registration - see README "Microsoft 365 setup".
+# Credentials come from M365_TENANT_ID / M365_CLIENT_ID / M365_CLIENT_SECRET.
+[[service]]
+name = "Microsoft 365"
+type = "microsoft365"
+services = ["Exchange Online", "Microsoft Teams", "SharePoint Online",
+            "OneDrive for Business", "Microsoft 365 suite", "Microsoft Entra",
+            "Microsoft Intune", "Microsoft 365 apps"]
+# include_advisories = true     # also alert on lower-impact advisories
+description = "Expect tickets about Outlook, Teams, OneDrive, and sign-in."
+
+# --- AWS ---------------------------------------------------------------------
+# Public AWS Health Dashboard. Filter by region and/or service so you only hear
+# about what you (or your vendors) actually use. us-east-1 hosts a huge share
+# of SaaS products, so an outage there often breaks other vendors too.
+[[service]]
+name = "AWS"
+type = "aws"
+regions = ["us-east-1", "us-east-2"]
+# services = ["Amazon CloudFront", "Amazon Simple Storage Service", "ec2"]
+description = "A us-east-1 outage often takes down other SaaS vendors too."
+
+# --- Internet service: ERC Broadband ----------------------------------------
+# 1) ERC's own network status (the "NETWORK STATUS" box on their homepage).
+#    Normally says "All ERC network systems are fully operational". If ERC
+#    posts anything else, you get an alert quoting their message.
+[[service]]
+name = "ERC Broadband network status"
+type = "page_text"
+url = "https://ercbroadband.com"
+section_class = "network-status"
+ok_text = "fully operational"
+failure_threshold = 1      # ERC only changes this text on purpose
+description = "ERC NOC: (828) 350-2415, after hours (866) 372-7110."
+
+# 2) Your campus connection, tested from the outside (recommended).
+# GitHub's servers try to reach your campus from the outside. If they can't,
+# your internet circuit is down - and because the alert is sent from GitHub,
+# it still reaches your phone (over cellular) while campus is offline.
+#
+# Point it at your firewall's public (WAN) IP and a port that answers from the
+# internet, e.g. your VPN portal (443), or use an "http" check against
+# something hosted on campus. If you have a backup ISP, add a second entry for
+# that IP so you know when you've failed over.
+#
+# [[service]]
+# name = "Campus internet (ERC Broadband)"
+# type = "tcp"
+# host = "203.0.113.10"      # <-- your ERC public IP or a DNS name that points to it
+# port = 443                 # <-- a port your firewall answers on
+# timeout = 10
+# failure_threshold = 2
+# reminder_minutes = 30
+# description = "Campus internet appears to be down. Call ERC Broadband support."
+
+# --- Other vendors -----------------------------------------------------------
 [[service]]
 name = "Canvas (Instructure)"
 type = "statuspage"
 url = "https://status.instructure.com"
-# components = ["Canvas"]   # optionally only watch specific components
 
 [[service]]
 name = "Zoom"

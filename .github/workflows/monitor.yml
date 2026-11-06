@@ -44,6 +44,9 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           ALERT_FROM: ${{ secrets.ALERT_FROM }}
           ALERT_TO: ${{ secrets.ALERT_TO }}
+          M365_TENANT_ID: ${{ secrets.M365_TENANT_ID }}
+          M365_CLIENT_ID: ${{ secrets.M365_CLIENT_ID }}
+          M365_CLIENT_SECRET: ${{ secrets.M365_CLIENT_SECRET }}
         run: python -m outage_detector run --once
 
       - name: Save state

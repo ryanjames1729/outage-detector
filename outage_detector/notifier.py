@@ -9,7 +9,7 @@ from collections import defaultdict
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
-from .checks import DEGRADED, DOWN, UP
+from .checks import DEGRADED, DOWN, UNKNOWN, UP
 from .config import Config, EmailConfig
 from .monitor import Event
 
@@ -17,6 +17,7 @@ LABEL = {
     DOWN: ("DOWN", "#c62828"),
     DEGRADED: ("DEGRADED", "#ef6c00"),
     UP: ("RECOVERED", "#2e7d32"),
+    UNKNOWN: ("CAN'T CHECK", "#616161"),
 }
 
 
@@ -25,6 +26,9 @@ def _headline(ev: Event) -> str:
     if ev.kind == "recovered":
         return f"{name} has RECOVERED (outage lasted {ev.duration})"
     word = LABEL[ev.status][0]
+    if ev.kind == "unknown":
+        return (f"{name} could not be checked for {ev.duration} - "
+                "monitoring for it is not working")
     if ev.kind == "reminder":
         return f"{name} is still {word} (for {ev.duration})"
     if ev.kind == "changed":
@@ -39,7 +43,8 @@ def build_subject(cfg: EmailConfig, events: list[Event]) -> str:
         if ev.kind == "reminder":
             label = f"STILL {label}"
         groups[label].append(ev.service["name"])
-    order = ["DOWN", "STILL DOWN", "DEGRADED", "STILL DEGRADED", "RECOVERED"]
+    order = ["DOWN", "STILL DOWN", "DEGRADED", "STILL DEGRADED", "RECOVERED",
+             "CAN'T CHECK"]
     parts = [f"{k}: {', '.join(groups[k])}" for k in order if k in groups]
     return f"{cfg.subject_prefix} {' | '.join(parts)}".strip()
 

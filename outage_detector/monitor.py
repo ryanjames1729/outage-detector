@@ -10,8 +10,9 @@ Alerting rules (per service):
   ``failure_threshold`` checks in a row, an update is sent.
 * After ``recovery_threshold`` successful checks in a row, a RECOVERED alert is
   sent with the total outage duration.
-* ``unknown`` results (e.g. a vendor status page we couldn't reach) are logged
-  but never change state.
+* ``unknown`` results (e.g. a vendor status page we couldn't reach) never
+  count as an outage. If a check stays unknown for ``unknown_alert_minutes``
+  a single "can't check" email is sent so monitoring doesn't silently stop.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ log = logging.getLogger("outage_detector")
 
 @dataclass
 class Event:
-    kind: str  # down | degraded | changed | reminder | recovered
+    kind: str  # down | degraded | changed | reminder | recovered | unknown
     service: dict
     result: CheckResult
     status: str
@@ -105,7 +106,19 @@ def evaluate(svc: dict, result: CheckResult, st: dict, cfg: Config,
     st["last_status"] = result.status
     st["last_summary"] = result.summary
     if result.status == UNKNOWN:
+        # Can't tell whether it's up. Never treat that as an outage, but if the
+        # check stays broken (expired credentials, moved status page...) say so
+        # once, so monitoring doesn't silently stop.
+        if not st.get("unknown_since"):
+            st["unknown_since"] = _iso(now)
+        limit = svc.get("unknown_alert_minutes", s.unknown_alert_minutes)
+        since = _dt(st["unknown_since"])
+        if limit and not st.get("unknown_alerted") and \
+                (now - since).total_seconds() >= limit * 60:
+            st["unknown_alerted"] = True
+            return Event("unknown", svc, result, UNKNOWN, since, now)
         return None
+    st["unknown_since"], st["unknown_alerted"] = None, False
 
     effective = result.status
     if effective == DEGRADED and not alert_degraded:

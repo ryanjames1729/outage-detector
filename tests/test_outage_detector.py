@@ -313,5 +313,176 @@ class TestEmailFormatting(unittest.TestCase):
         self.assertIn("Video calls", html)
 
 
+class TestStatuspageGroups(ServerTest):
+    """Mirrors the real structure of status.blackbaud.com / status.finalsite.com."""
+
+    def setUp(self):
+        super().setUp()
+        comps = [
+            {"id": "g1", "name": "Blackbaud Education Management Solutions",
+             "status": "partial_outage", "group": True, "components": ["c1", "c2"]},
+            {"id": "c1", "name": "Blackbaud Student Information System\u2122",
+             "status": "partial_outage", "group": False, "group_id": "g1"},
+            {"id": "c2", "name": "Core Functionality", "status": "operational",
+             "group": False, "group_id": "g1"},
+            {"id": "c3", "name": "JustGiving\u00ae from Blackbaud\u00ae",
+             "status": "major_outage", "group": False},
+        ]
+        incidents = [
+            {"name": "SIS slow", "status": "investigating", "impact": "minor",
+             "components": [{"id": "c1"}]},
+            {"name": "JustGiving down", "status": "investigating", "impact": "major",
+             "components": [{"id": "c3"}]},
+        ]
+        ROUTES["/api/v2/summary.json"] = (200, json.dumps(
+            {"status": {"indicator": "major"}, "components": comps,
+             "incidents": incidents}).encode())
+
+    def test_group_expands_to_children(self):
+        r = checks.check_statuspage({"url": self.base, "components": [
+            "blackbaud education management solutions"]})
+        self.assertEqual(r.status, DEGRADED)
+        self.assertIn("Blackbaud Student Information System\u2122: partial outage", r.details)
+        self.assertTrue(any("SIS slow" in d for d in r.details))
+        # Incidents about products we don't watch are left out.
+        self.assertFalse(any("JustGiving" in d for d in r.details))
+
+    def test_trademark_symbols_optional(self):
+        r = checks.check_statuspage({"url": self.base, "components": [
+            "Blackbaud Student Information System", "Core Functionality"]})
+        self.assertEqual(r.status, DEGRADED)
+        self.assertFalse(any("not found" in d for d in r.details))
+        r = checks.check_statuspage({"url": self.base, "components": ["JustGiving from Blackbaud"]})
+        self.assertEqual(r.status, DOWN)
+
+
+class TestGoogleCloud(ServerTest):
+    def test_same_feed_format(self):
+        ROUTES["/c.json"] = (200, json.dumps([{"end": None, "status_impact": "SERVICE_OUTAGE",
+            "affected_products": [{"title": "Google Compute Engine"}],
+            "external_desc": "GCE down"}]).encode())
+        r = checks.check_google_cloud({"url": self.base + "/c.json"})
+        self.assertEqual(r.status, DOWN)
+        self.assertIn("status.cloud.google.com", r.details[-1])
+
+
+class TestAws(ServerTest):
+    EVENTS = [
+        {"service": "ec2-us-east-1", "service_name": "Amazon Elastic Compute Cloud",
+         "region_name": "N. Virginia", "status": "3", "summary": "Instances unreachable"},
+        {"service": "s3-us-west-2", "service_name": "Amazon Simple Storage Service",
+         "region_name": "Oregon", "status": "2", "summary": "Elevated errors"},
+        {"service": "cloudfront", "service_name": "Amazon CloudFront",
+         "region_name": "", "status": "1", "summary": "[RESOLVED] Latency"},
+    ]
+
+    def test_filters_and_utf16(self):
+        ROUTES["/aws"] = (200, json.dumps(self.EVENTS).encode("utf-16"))
+        url = self.base + "/aws"
+        r = checks.check_aws({"url": url, "regions": ["us-east-1"]})
+        self.assertEqual(r.status, DOWN)
+        self.assertIn("Instances unreachable", r.details[0])
+        r = checks.check_aws({"url": url, "regions": ["us-west-2"]})
+        self.assertEqual(r.status, DEGRADED)
+        r = checks.check_aws({"url": url, "services": ["Amazon CloudFront"]})
+        self.assertEqual(r.status, UP)  # only a resolved event
+        r = checks.check_aws({"url": url, "services": ["ec2"]})
+        self.assertEqual(r.status, DOWN)
+
+    def test_empty_feed(self):
+        ROUTES["/aws"] = (200, b"")
+        self.assertEqual(checks.check_aws({"url": self.base + "/aws"}).status, UP)
+        ROUTES["/aws"] = (200, b"[]")
+        self.assertEqual(checks.check_aws({"url": self.base + "/aws"}).status, UP)
+
+
+class TestMicrosoft365(unittest.TestCase):
+    ISSUES = [
+        {"id": "EX1", "service": "Exchange Online", "title": "Mail delays",
+         "classification": "incident", "status": "serviceDegradation",
+         "impactDescription": "Users may see delays"},
+        {"id": "TM1", "service": "Microsoft Teams", "title": "Can't join meetings",
+         "classification": "incident", "status": "serviceInterruption"},
+        {"id": "SP1", "service": "SharePoint Online", "title": "Minor thing",
+         "classification": "advisory", "status": "serviceDegradation"},
+    ]
+
+    def run_check(self, svc, issues=None):
+        body = json.dumps({"value": self.ISSUES if issues is None else issues}).encode()
+        with mock.patch.object(checks, "_m365_token", return_value="tok"), \
+             mock.patch.object(checks, "_request", return_value=(200, body, 5)) as req:
+            r = checks.check_microsoft365(svc)
+        if req.called:
+            self.assertEqual(req.call_args.kwargs["headers"]["Authorization"], "Bearer tok")
+        return r
+
+    def test_mapping_and_filters(self):
+        self.assertEqual(self.run_check({}).status, DOWN)
+        r = self.run_check({"services": ["exchange online"]})
+        self.assertEqual(r.status, DEGRADED)
+        self.assertIn("EX1", r.details[0])
+        self.assertEqual(self.run_check({"services": ["SharePoint Online"]}).status, UP)
+        self.assertEqual(self.run_check({"services": ["SharePoint Online"],
+                                         "include_advisories": True}).status, DEGRADED)
+        self.assertEqual(self.run_check({}, issues=[]).status, UP)
+
+    def test_missing_credentials_is_unknown(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            r = checks.check_microsoft365({})
+        self.assertEqual(r.status, UNKNOWN)
+        self.assertIn("M365_CLIENT_SECRET", r.summary)
+
+
+class TestUnknownAlert(unittest.TestCase):
+    def test_alerts_once_when_check_keeps_failing(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = load_config(make_config(Path(d), SVC))
+            svc, st = cfg.services[0], {"confirmed": UP, "fail_streak": 0, "ok_streak": 0,
+                                        "last_effective": UP, "same_streak": 0,
+                                        "since": None, "last_alert": None}
+            t = datetime(2026, 11, 6, tzinfo=timezone.utc)
+            kinds = []
+            for i in range(30):  # 30 x 5 min = 150 min
+                ev = evaluate(svc, CheckResult(UNKNOWN, "?"), st, cfg, t + timedelta(minutes=5 * i))
+                kinds.append(ev.kind if ev else None)
+            self.assertEqual([k for k in kinds if k], ["unknown"])
+            self.assertEqual(kinds.index("unknown"), 24)  # after 120 minutes
+            evaluate(svc, CheckResult(UP, "ok"), st, cfg, t + timedelta(hours=3))
+            self.assertFalse(st["unknown_alerted"])
+            self.assertEqual(st["confirmed"], UP)
+
+
+class TestPageText(ServerTest):
+    PAGE = """<html><head><style>.network-status{color:red}</style></head><body>
+    <div class="footer"><p>fully operational elsewhere</p></div>
+    <div class="network-status"><div class="vertical-line"></div>
+      <div class="inner-content"><h2>NETWORK STATUS</h2><br>
+      <p>As of November 06, 2026</p><p>%s</p></div></div>
+    <div class="copyright">&reg; ERC</div></body></html>"""
+
+    def svc(self):
+        return {"url": self.base + "/", "section_class": "network-status",
+                "ok_text": "fully operational"}
+
+    def test_operational(self):
+        ROUTES["/"] = (200, (self.PAGE % "All ERC network systems are fully operational.").encode())
+        r = checks.check_page_text(self.svc())
+        self.assertEqual(r.status, UP)
+        self.assertNotIn("ERC</div>", r.details[0])
+        self.assertNotIn("\u00ae", r.details[0])  # stopped at the end of the section
+
+    def test_changed_message_is_reported(self):
+        ROUTES["/"] = (200, (self.PAGE % "Fiber cut near Asheville, crews dispatched.").encode())
+        r = checks.check_page_text(self.svc())
+        self.assertEqual(r.status, DEGRADED)
+        self.assertIn("Fiber cut near Asheville", r.details[0])
+        r = checks.check_page_text({**self.svc(), "problem_status": "down"})
+        self.assertEqual(r.status, DOWN)
+
+    def test_layout_change_is_unknown(self):
+        ROUTES["/"] = (200, b"<html><body>redesigned</body></html>")
+        self.assertEqual(checks.check_page_text(self.svc()).status, UNKNOWN)
+
+
 if __name__ == "__main__":
     unittest.main()

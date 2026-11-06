@@ -13,12 +13,16 @@ Every check returns a CheckResult whose status is one of:
 from __future__ import annotations
 
 import json
+import os
+import re
 import socket
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any, Callable
 
 from . import __version__
@@ -143,6 +147,11 @@ def check_tcp(svc: dict) -> CheckResult:
                            f"{latency:.0f} ms", latency_ms=latency)
 
 
+def _norm(name: str) -> str:
+    """Case/whitespace-insensitive and ignore ™ ® © so config names are easy to type."""
+    return " ".join(re.sub(r"[™®©]", "", name).lower().split())
+
+
 _SP_COMPONENT = {
     "operational": UP,
     "under_maintenance": UP,
@@ -165,15 +174,27 @@ def check_statuspage(svc: dict) -> CheckResult:
         return CheckResult(UNKNOWN, f"Could not read status page: "
                                     f"{_describe_error(e)}", [api])
 
-    wanted = [c.lower() for c in svc.get("components", [])]
+    wanted = {_norm(c) for c in svc.get("components", [])}
     details: list[str] = []
+    watched_ids: set[str] = set()
     if wanted:
-        comps = [c for c in data.get("components", [])
-                 if c.get("name", "").lower() in wanted]
-        missing = set(wanted) - {c["name"].lower() for c in comps}
+        all_comps = data.get("components", [])
+        matched = [c for c in all_comps if _norm(c.get("name", "")) in wanted]
+        missing = wanted - {_norm(c["name"]) for c in matched}
         if missing:
             details.append("Components not found on status page: "
                            + ", ".join(sorted(missing)))
+        # Naming a group (e.g. "School Websites") watches everything in it, so
+        # the alert names the exact product that's affected.
+        comps = []
+        for c in matched:
+            children = c.get("components") if c.get("group") else None
+            if children:
+                comps += [x for x in all_comps if x.get("id") in children]
+            else:
+                comps.append(c)
+        comps = list({id(c): c for c in comps}.values())  # de-duplicate
+        watched_ids = {c["id"] for c in comps if "id" in c}
         statuses = [_SP_COMPONENT.get(c.get("status"), DEGRADED) for c in comps]
         for c in comps:
             if c.get("status") != "operational":
@@ -190,6 +211,9 @@ def check_statuspage(svc: dict) -> CheckResult:
     for inc in data.get("incidents", []):
         if inc.get("status") in ("resolved", "postmortem"):
             continue
+        affected = {c.get("id") for c in inc.get("components", [])}
+        if watched_ids and affected and not affected & watched_ids:
+            continue  # incident is about components we don't watch
         line = f"Incident: {inc.get('name')} [{inc.get('status')}, impact {inc.get('impact')}]"
         if inc.get("shortlink"):
             line += f" {inc['shortlink']}"
@@ -200,24 +224,24 @@ def check_statuspage(svc: dict) -> CheckResult:
 
 _GOOGLE_IMPACT = {"SERVICE_OUTAGE": DOWN, "SERVICE_DISRUPTION": DEGRADED,
                   "SERVICE_INFORMATION": UP}
-GOOGLE_FEED = "https://www.google.com/appsstatus/dashboard/incidents.json"
+GOOGLE_WORKSPACE_FEED = "https://www.google.com/appsstatus/dashboard/incidents.json"
+GOOGLE_CLOUD_FEED = "https://status.cloud.google.com/incidents.json"
 
 
-def check_google_workspace(svc: dict) -> CheckResult:
-    """Read Google's Workspace Status Dashboard (Gmail, Drive, Classroom...)."""
-    url = svc.get("url", GOOGLE_FEED)
+def _check_google(svc: dict, default_url: str, page: str) -> CheckResult:
+    url = svc.get("url", default_url)
     try:
         incidents = _fetch_json(url, svc.get("timeout", 15))
     except Exception as e:  # noqa: BLE001
         return CheckResult(UNKNOWN, f"Could not read Google status feed: "
                                     f"{_describe_error(e)}", [url])
-    wanted = [p.lower() for p in svc.get("products", [])]
+    wanted = {_norm(p) for p in svc.get("products", [])}
     statuses, details = [], []
     for inc in incidents:
         if inc.get("end"):
             continue  # resolved
         products = [p.get("title", "") for p in inc.get("affected_products", [])]
-        if wanted and not any(p.lower() in wanted for p in products):
+        if wanted and not any(_norm(p) in wanted for p in products):
             continue
         s = _GOOGLE_IMPACT.get(inc.get("status_impact"), DEGRADED)
         statuses.append(s)
@@ -229,8 +253,231 @@ def check_google_workspace(svc: dict) -> CheckResult:
     status = worst(statuses)
     summary = ("No active incidents" if status == UP
                else f"{len(details)} active incident(s)")
-    details.append("Status page: https://www.google.com/appsstatus/dashboard/")
+    details.append(f"Status page: {page}")
     return CheckResult(status, summary, details)
+
+
+def check_google_workspace(svc: dict) -> CheckResult:
+    """Google Workspace Status Dashboard (Gmail, Drive, Classroom, Meet...)."""
+    return _check_google(svc, GOOGLE_WORKSPACE_FEED,
+                         "https://www.google.com/appsstatus/dashboard/")
+
+
+def check_google_cloud(svc: dict) -> CheckResult:
+    """Google Cloud status dashboard (Compute Engine, Cloud Storage...)."""
+    return _check_google(svc, GOOGLE_CLOUD_FEED, "https://status.cloud.google.com/")
+
+
+# --------------------------------------------------------------------------
+# Microsoft 365 (tenant-specific, via Microsoft Graph service health)
+# --------------------------------------------------------------------------
+
+# https://learn.microsoft.com/graph/api/resources/servicehealthissue
+_M365_UP = {"serviceOperational", "serviceRestored", "falsePositive", "resolved",
+            "resolvedExternal", "mitigated", "mitigatedExternal",
+            "postIncidentReviewPublished", "investigationSuspended"}
+_M365_DOWN = {"serviceInterruption"}
+GRAPH = "https://graph.microsoft.com/v1.0"
+
+
+def _m365_token(svc: dict) -> str:
+    tenant = os.environ.get("M365_TENANT_ID") or svc.get("tenant_id")
+    client = os.environ.get("M365_CLIENT_ID") or svc.get("client_id")
+    secret = os.environ.get("M365_CLIENT_SECRET")
+    if not (tenant and client and secret):
+        raise LookupError("Microsoft 365 check needs M365_TENANT_ID, "
+                          "M365_CLIENT_ID and M365_CLIENT_SECRET (see README)")
+    body = urllib.parse.urlencode({
+        "client_id": client, "client_secret": secret, "grant_type": "client_credentials",
+        "scope": "https://graph.microsoft.com/.default"}).encode()
+    req = urllib.request.Request(
+        f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+        data=body, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=svc.get("timeout", 15)) as r:
+            return json.loads(r.read())["access_token"]
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read() or b"{}").get("error_description", "")
+        except ValueError:
+            err = ""
+        raise RuntimeError(f"Microsoft sign-in failed (HTTP {e.code}): "
+                           f"{err.splitlines()[0] if err else ''}") from None
+
+
+def check_microsoft365(svc: dict) -> CheckResult:
+    """Microsoft 365 Service health for *your* tenant (Exchange, Teams,
+    SharePoint, OneDrive, Entra ID, Intune...). This is the same data as the
+    admin center's Service health page, which is more accurate than any
+    public Microsoft status page."""
+    try:
+        token = _m365_token(svc)
+        url = (f"{GRAPH}/admin/serviceAnnouncement/issues"
+               "?$filter=isResolved%20eq%20false&$top=100")
+        issues: list[dict] = []
+        while url:
+            code, body, _ = _request(url, timeout=svc.get("timeout", 15), headers={
+                "Authorization": f"Bearer {token}", "Accept": "application/json"})
+            if code >= 400:
+                raise RuntimeError(f"Graph API HTTP {code}: {body[:200]!r}")
+            page = json.loads(body)
+            issues += page.get("value", [])
+            url = page.get("@odata.nextLink")
+    except LookupError as e:
+        return CheckResult(UNKNOWN, str(e))
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(UNKNOWN, f"Could not read Microsoft 365 service health: "
+                                    f"{_describe_error(e)}")
+
+    wanted = {_norm(s) for s in svc.get("services", [])}
+    advisories = svc.get("include_advisories", False)
+    statuses, details = [], []
+    for i in issues:
+        if wanted and _norm(i.get("service", "")) not in wanted:
+            continue
+        if i.get("classification") != "incident" and not advisories:
+            continue
+        st = i.get("status", "")
+        s = UP if st in _M365_UP else DOWN if st in _M365_DOWN else DEGRADED
+        statuses.append(s)
+        if s != UP:
+            impact = " ".join((i.get("impactDescription") or "").split())[:300]
+            details.append(f"{i.get('service')} - {i.get('title')} [{i.get('id')}, "
+                           f"{st}]: {impact}")
+    status = worst(statuses)
+    summary = ("No active incidents" if status == UP
+               else f"{len(details)} active incident(s)")
+    details.append("Admin center: https://admin.microsoft.com/#/servicehealth")
+    return CheckResult(status, summary, details)
+
+
+# --------------------------------------------------------------------------
+# AWS public Health Dashboard
+# --------------------------------------------------------------------------
+
+AWS_FEED = "https://health.aws.amazon.com/public/currentevents"
+# Status codes used by the public dashboard: 0 resolved, 1 informational,
+# 2 degradation, 3 disruption.
+_AWS_STATUS = {"0": UP, "1": DEGRADED, "2": DEGRADED, "3": DOWN}
+
+
+def check_aws(svc: dict) -> CheckResult:
+    """AWS Health Dashboard: current public events. Filter with `regions`
+    (e.g. "us-east-1") and/or `services` (e.g. "Amazon CloudFront", "ec2")."""
+    url = svc.get("url", AWS_FEED)
+    try:
+        code, body, _ = _request(url, timeout=svc.get("timeout", 15))
+        if code >= 400:
+            raise RuntimeError(f"HTTP {code}")
+        # The feed has been served as UTF-16 at times; handle either encoding.
+        if body[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            text = body.decode("utf-16")
+        else:
+            text = body.decode("utf-8-sig")
+        events = json.loads(text) if text.strip() else []
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(UNKNOWN, f"Could not read AWS Health Dashboard: "
+                                    f"{_describe_error(e)}", [url])
+
+    regions = {r.lower() for r in svc.get("regions", [])}
+    services = {_norm(s) for s in svc.get("services", [])}
+    statuses, details = [], []
+    for ev in events:
+        key = (ev.get("service") or "").lower()          # e.g. "ec2-us-east-1"
+        name = ev.get("service_name") or key
+        region = (ev.get("region_name") or "").lower()
+        if regions and not any(r in key or r == region for r in regions):
+            continue
+        if services and not any(s == _norm(name) or key.startswith(s + "-")
+                                or s == key for s in services):
+            continue
+        summary = ev.get("summary") or ""
+        if summary.upper().startswith("[RESOLVED]"):
+            continue
+        s = _AWS_STATUS.get(str(ev.get("status")), DEGRADED)
+        statuses.append(s)
+        if s != UP:
+            details.append(f"{name} ({ev.get('region_name') or 'global'}): {summary}")
+    status = worst(statuses)
+    summary = ("No active events" if status == UP
+               else f"{len(details)} active event(s)")
+    details.append("Status page: https://health.aws.amazon.com/health/status")
+    return CheckResult(status, summary, details)
+
+
+# --------------------------------------------------------------------------
+# Status text on an ordinary web page (e.g. ERC Broadband's homepage)
+# --------------------------------------------------------------------------
+
+class _SectionText(HTMLParser):
+    """Collect the visible text inside the first element with a given class."""
+
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+            "meta", "source", "track", "wbr"}
+
+    def __init__(self, css_class: str | None):
+        super().__init__(convert_charrefs=True)
+        self.css_class = css_class
+        self.depth = 0 if css_class else 1  # no class: whole page
+        self.done = False
+        self.skip = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self.skip += 1
+        if tag in self.VOID or self.done:
+            return
+        if self.depth:
+            self.depth += 1
+        elif self.css_class in (dict(attrs).get("class") or "").split():
+            self.depth = 1
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style") and self.skip:
+            self.skip -= 1
+        if tag in self.VOID or self.done or not self.depth:
+            return
+        self.depth -= 1
+        if self.depth == 0 and self.css_class:
+            self.done = True
+
+    def handle_data(self, data):
+        if self.depth and not self.done and not self.skip:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        return " ".join(" ".join(self.parts).split())
+
+
+def check_page_text(svc: dict) -> CheckResult:
+    """Read a status message from a normal web page.
+
+    UP when the section contains one of `ok_text`. Any other message means
+    the provider posted something, so it's reported (as `problem_status`,
+    default "degraded") with their message quoted in the alert.
+    """
+    url = svc["url"]
+    try:
+        code, body, _ = _request(url, timeout=svc.get("timeout", 15))
+        if code >= 400:
+            raise RuntimeError(f"HTTP {code}")
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(UNKNOWN, f"Could not load status page: "
+                                    f"{_describe_error(e)}", [url])
+    parser = _SectionText(svc.get("section_class"))
+    parser.feed(body.decode("utf-8", errors="replace"))
+    text = parser.text()
+    if not text:
+        return CheckResult(UNKNOWN, "Status section not found on the page "
+                                    "(the site layout may have changed)", [url])
+    ok = svc["ok_text"]
+    ok = [ok] if isinstance(ok, str) else ok
+    if any(o.lower() in text.lower() for o in ok):
+        return CheckResult(UP, "Provider reports normal operation", [text[:500], url])
+    status = svc.get("problem_status", DEGRADED)
+    return CheckResult(status, "Provider has posted a status message",
+                       [f'"{text[:800]}"', url])
 
 
 CHECKS: dict[str, Callable[[dict], CheckResult]] = {
@@ -238,6 +485,10 @@ CHECKS: dict[str, Callable[[dict], CheckResult]] = {
     "tcp": check_tcp,
     "statuspage": check_statuspage,
     "google_workspace": check_google_workspace,
+    "google_cloud": check_google_cloud,
+    "microsoft365": check_microsoft365,
+    "aws": check_aws,
+    "page_text": check_page_text,
 }
 
 

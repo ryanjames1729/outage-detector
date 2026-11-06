@@ -40,6 +40,7 @@ class Settings:
     recovery_threshold: int = 2
     reminder_minutes: int = 60
     alert_on_degraded: bool = True
+    unknown_alert_minutes: int = 120
     state_file: str = "state.json"
     max_workers: int = 10
 
@@ -58,6 +59,8 @@ _ENV_MAP = {
 }
 
 _REQUIRED = {"http": ["url"], "tcp": ["host", "port"], "statuspage": ["url"],
+             "google_cloud": [], "microsoft365": [], "aws": [],
+             "page_text": ["url", "ok_text"],
              "google_workspace": []}
 
 
