@@ -86,7 +86,7 @@ and alerts name the specific component that's affected.
    test email"**, and run. You should get a test email within a minute, and
    the run log shows every check's result. Normal runs only email when
    something changes, so a quiet inbox means everything is up.
-4. That's it. The workflow runs every 5 minutes on the default branch.
+4. That's it. Checks run every 5 minutes, around the clock, from the default branch.
 
 ### Email provider notes
 
@@ -103,15 +103,16 @@ and alerts name the specific component that's affected.
 
 ### Things to know about GitHub Actions
 
-- **Run frequency.** GitHub's scheduler can start runs a few minutes late, and
-  sometimes skips a run under heavy load. That's fine for "get ahead of the
-  tickets," but don't treat it as a to-the-second monitor.
-- **Actions minutes.** Public repositories run for free. Private repositories
-  bill each run as at least 1 minute. Every 5 minutes works out to about
-  8,600 minutes a month, which is more than the free 2,000. For a private
-  repo, change the cron in [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml)
-  to `*/30 * * * *` (about 1,450 min/month), or use a self-hosted runner
-  (which is free).
+- **How it stays running.** GitHub starts scheduled workflows on a
+  best-effort basis. On a quiet repo, a "every 5 minutes" schedule was observed
+  firing only about every 7 hours. So each scheduled run stays alive for about
+  5h40m, checking every `interval_seconds`, and the next run waits in the queue
+  to take over as soon as it ends. The hourly cron only keeps a run queued.
+  Manual runs ("Run workflow") check once and don't wait behind the long run.
+- **Actions minutes.** Public repositories run for free. A private repository
+  would use the runner around the clock (about 43,000 minutes a month), far
+  more than any plan includes. Keep this repo public (`config.toml` contains no
+  secrets), or use a self-hosted runner, which is free.
 - **Internal services.** GitHub's runners are on the public internet, so they
   can't reach anything that is only on your school network (an on-prem
   server, internal IPs). To monitor those, install a

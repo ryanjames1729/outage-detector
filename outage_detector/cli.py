@@ -3,6 +3,7 @@
     python -m outage_detector check           # run checks, print results, no email
     python -m outage_detector run --once      # one monitoring pass (GitHub Actions / cron)
     python -m outage_detector run             # loop forever every interval_seconds
+    python -m outage_detector run --duration 340   # loop for 340 minutes, then exit
     python -m outage_detector test-email      # send a test email
     python -m outage_detector status          # show saved state
 """
@@ -29,6 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="monitor and send alerts")
     r.add_argument("--once", action="store_true", help="single pass, then exit")
     r.add_argument("--dry-run", action="store_true", help="don't send email")
+    r.add_argument("--duration", type=float, metavar="MINUTES",
+                   help="keep checking every interval_seconds for this long, then exit "
+                        "(used by GitHub Actions, whose schedules are unreliable)")
     sub.add_parser("check", help="run all checks and print results (no state, no email)")
     sub.add_parser("test-email", help="send a test email using [email] settings")
     sub.add_parser("status", help="print saved state")
@@ -74,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # run
+    interval = cfg.settings.interval_seconds
+    deadline = time.monotonic() + args.duration * 60 if args.duration else None
     while True:
         try:
             run_once(cfg, send=not args.dry_run)
@@ -82,4 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         if args.once:
             return 0
-        time.sleep(cfg.settings.interval_seconds)
+        if deadline is not None and time.monotonic() + interval > deadline:
+            logging.getLogger("outage_detector").info(
+                "Reached --duration; exiting so the next scheduled run takes over")
+            return 0
+        time.sleep(interval)

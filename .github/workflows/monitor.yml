@@ -2,9 +2,13 @@ name: Outage monitor
 
 on:
   schedule:
-    # GitHub's minimum is every 5 minutes; runs can start a few minutes late
-    # when GitHub is busy. See README for Actions-minutes math on private repos.
-    - cron: "*/5 * * * *"
+    # GitHub runs schedules on a best-effort basis and may start them hours
+    # late on a quiet repo. So each scheduled run stays alive and checks every
+    # interval_seconds (5 min) for ~5h40m, the next run waits in the queue,
+    # and starts as soon as the current one finishes - continuous coverage.
+    # This cron only needs to keep a run queued. Minute 17 avoids the
+    # top-of-the-hour rush on GitHub's scheduler.
+    - cron: "17 * * * *"
   workflow_dispatch:      # "Run workflow" button for manual runs
     inputs:
       test_email:
@@ -12,9 +16,10 @@ on:
         type: boolean
         default: false
 
-# Never let two runs overlap (they'd fight over state.json).
+# One scheduled monitor at a time; the next one waits in the queue. Manual
+# runs use their own group so "Run workflow" doesn't wait behind a 6h run.
 concurrency:
-  group: outage-monitor
+  group: outage-monitor-${{ github.event_name }}
   cancel-in-progress: false
 
 permissions:
@@ -23,7 +28,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 355   # GitHub's maximum job length is 360
     env:
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
       SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -53,7 +58,12 @@ jobs:
         run: python -m outage_detector test-email
 
       - name: Run checks
-        run: python -m outage_detector run --once
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python -m outage_detector run --duration 340
+          else
+            python -m outage_detector run --once
+          fi
 
       - name: Save state
         if: always()

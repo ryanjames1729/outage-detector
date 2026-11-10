@@ -526,5 +526,21 @@ class TestSmtpDiagnostics(unittest.TestCase):
         self.assertEqual((cfg.email.port, cfg.email.security), (465, "ssl"))
 
 
+class TestDurationLoop(ServerTest):
+    def test_runs_until_deadline_then_exits(self):
+        from outage_detector.cli import main
+        with tempfile.TemporaryDirectory() as d:
+            p = make_config(Path(d), f'[[service]]\nname = "Site"\ntype = "http"\nurl = "{self.base}/"\n')
+            s = p.read_text().replace("[settings]", "[settings]\ninterval_seconds = 60")
+            p.write_text(s)
+            ROUTES["/"] = (200, b"ok")
+            clock = [0.0]
+            with mock.patch("time.monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch("time.sleep", side_effect=lambda n: clock.__setitem__(0, clock[0] + n)), \
+                 mock.patch("outage_detector.cli.run_once") as ro:
+                self.assertEqual(main(["-c", str(p), "run", "--duration", "5"]), 0)
+            self.assertEqual(ro.call_count, 6)  # t=0..5 min; t=6 would pass the deadline
+
+
 if __name__ == "__main__":
     unittest.main()
