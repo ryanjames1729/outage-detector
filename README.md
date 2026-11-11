@@ -104,11 +104,15 @@ and alerts name the specific component that's affected.
 ### Things to know about GitHub Actions
 
 - **How it stays running.** GitHub starts scheduled workflows on a
-  best-effort basis. On a quiet repo, a "every 5 minutes" schedule was observed
-  firing only about every 7 hours. So each scheduled run stays alive for about
-  5h40m, checking every `interval_seconds`, and the next run waits in the queue
-  to take over as soon as it ends. The hourly cron only keeps a run queued.
-  Manual runs ("Run workflow") check once and don't wait behind the long run.
+  best-effort basis. On this repo a 5-minute schedule fired only every few
+  hours. So each "continuous" run stays alive for about 5h40m, checking every
+  `interval_seconds`. When it starts, it queues the next continuous run, which
+  takes over as soon as it ends. The hourly schedule is a safety net that
+  restarts the chain if it ever breaks. In the Actions tab you'll see one run
+  *in progress* for hours, and occasionally a *cancelled* run. Both are normal:
+  only one run can wait in line, so a newer queued run replaces an older one.
+- **Pausing monitoring.** Actions → Outage monitor → "…" → **Disable workflow**,
+  then cancel the run in progress. Re-enable it to resume.
 - **Actions minutes.** Public repositories run for free. A private repository
   would use the runner around the clock (about 43,000 minutes a month), far
   more than any plan includes. Keep this repo public (`config.toml` contains no

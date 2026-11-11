@@ -1,35 +1,47 @@
 name: Outage monitor
 
+# How this stays running around the clock:
+#
+# GitHub starts scheduled workflows on a best-effort basis (on this repo a
+# 5-minute schedule fired only every few hours). So a "continuous" run stays
+# alive for ~5h40m, checking every interval_seconds (5 min). When it starts,
+# it queues the next continuous run, which waits (one run at a time) and
+# takes over the moment this one finishes. The hourly schedule is only a
+# safety net that restarts the chain if it ever breaks.
+#
+# To pause monitoring: Actions -> Outage monitor -> "..." -> Disable workflow,
+# then cancel the run that's in progress.
+
 on:
   schedule:
-    # GitHub runs schedules on a best-effort basis and may start them hours
-    # late on a quiet repo. So each scheduled run stays alive and checks every
-    # interval_seconds (5 min) for ~5h40m, the next run waits in the queue,
-    # and starts as soon as the current one finishes - continuous coverage.
-    # This cron only needs to keep a run queued. Minute 17 avoids the
-    # top-of-the-hour rush on GitHub's scheduler.
-    - cron: "17 * * * *"
-  workflow_dispatch:      # "Run workflow" button for manual runs
+    - cron: "17 * * * *"   # minute 17 avoids GitHub's top-of-the-hour rush
+  workflow_dispatch:       # "Run workflow" button
     inputs:
       test_email:
         description: "Also send a test email (checks your SMTP settings)"
         type: boolean
         default: false
+      continuous:
+        description: "Start continuous monitoring (normally started automatically)"
+        type: boolean
+        default: false
 
-# One scheduled monitor at a time; the next one waits in the queue. Manual
-# runs use their own group so "Run workflow" doesn't wait behind a 6h run.
+# Continuous runs go one at a time; the next waits its turn. Manual one-off
+# checks use a separate group so they never wait behind a long run.
 concurrency:
-  group: outage-monitor-${{ github.event_name }}
+  group: outage-monitor-${{ (github.event_name == 'schedule' || inputs.continuous) && 'continuous' || 'manual' }}
   cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: write   # lets a run queue the next run of this workflow
 
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 355   # GitHub's maximum job length is 360
     env:
+      CONTINUOUS: ${{ (github.event_name == 'schedule' || inputs.continuous) && 'true' || 'false' }}
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
       SMTP_PORT: ${{ secrets.SMTP_PORT }}
       SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
@@ -37,6 +49,13 @@ jobs:
       ALERT_FROM: ${{ secrets.ALERT_FROM }}
       ALERT_TO: ${{ secrets.ALERT_TO }}
     steps:
+      - name: Queue the next continuous run
+        if: env.CONTINUOUS == 'true'
+        continue-on-error: true   # never let this stop the checks below
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run monitor.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f continuous=true
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -59,7 +78,7 @@ jobs:
 
       - name: Run checks
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "$CONTINUOUS" = "true" ]; then
             python -m outage_detector run --duration 340
           else
             python -m outage_detector run --once
